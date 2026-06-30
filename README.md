@@ -2,15 +2,17 @@
 
 一个用于筛选 YOLO 目标检测数据集的本地桌面工具。
 
-第一版目标：
+主要功能：
 
 - 打开 YOLO 格式数据集
 - 可视化每张图片的多个目标框和类别
+- 支持从 `data.yaml`、`dataset.yaml`、`classes.txt`、`classes`、`obj.names` 读取类别名
 - 上一张 / 下一张浏览
+- 鼠标滚轮缩放图片，左键拖动平移图片
 - 标记“需要重标”
 - 标记“删除”
 - 保存筛选进度
-- 导出后把原数据集复制拆成三份：待重标、删除、合格
+- 导出后把原数据集复制拆成三份：待重标、删除、合格，并复制类别文件
 
 ## 支持的数据集结构
 
@@ -41,7 +43,8 @@ dataset/
 dataset/
 ├─ JPEGImages/
 ├─ Visualization/
-└─ yolo_labels/
+├─ yolo_labels/
+└─ classes.txt
 ```
 
 其中 `Visualization`、`vis`、`preview`、`results` 这类可视化/预览目录会被扫描器跳过。
@@ -52,6 +55,15 @@ dataset/
 0 0.5123 0.4368 0.2410 0.3302
 2 0.2710 0.6000 0.1200 0.1800
 ```
+
+类别名支持以下文件：
+
+- `data.yaml` 或 `dataset.yaml` 中的 `names`
+- `classes.txt`
+- `classes`
+- `obj.names`
+
+`classes.txt`、`classes`、`obj.names` 按“一行一个类别名”解析，行号就是类别编号，中文和英文类别名都可以显示。
 
 ## 安装依赖
 
@@ -110,11 +122,15 @@ xattr -dr com.apple.quarantine YoloDatasetReviewer.app
    - `W` / `Delete`：标记/取消删除
    - `Ctrl+O`：打开数据集
    - `Ctrl+E`：导出三份数据集
-5. 遇到框偏、漏标、类别错、框多余的图片，按 `Space` 标记待重标。
-6. 遇到不要保留的坏图，按 `Delete` 标记删除。
-7. 其他未标记图片自动归为合格。
-8. 点击 `导出三份数据集`，选择输出目录。
-9. 待重标导出模式：
+5. 查看细节时可以直接操作中间图片区：
+   - 鼠标滚轮：放大 / 缩小
+   - 左键拖动：平移图片
+   - 双击图片：恢复适合窗口大小
+6. 遇到框偏、漏标、类别错、框多余的图片，按 `Space` 标记待重标。
+7. 遇到不要保留的坏图，按 `Delete` 标记删除。
+8. 其他未标记图片自动归为合格。
+9. 点击 `导出三份数据集`，选择输出目录。
+10. 待重标导出模式：
    - 保留原标签：复制图片和原 `.txt`
    - 清空标签：复制图片并生成空 `.txt`
 
@@ -124,15 +140,20 @@ xattr -dr com.apple.quarantine YoloDatasetReviewer.app
 relabel_dataset/
 ├─ relabel/
 │  ├─ images/
-│  └─ labels/
+│  ├─ labels/
+│  └─ classes.txt
 ├─ delete/
 │  ├─ images/
-│  └─ labels/
+│  ├─ labels/
+│  └─ classes.txt
 ├─ qualified/
 │  ├─ images/
-│  └─ labels/
+│  ├─ labels/
+│  └─ classes.txt
 └─ review_split_manifest.json
 ```
+
+如果原数据集根目录存在 `classes.txt`、`classes` 或 `obj.names`，导出时会复制到 `relabel`、`delete`、`qualified` 三个子数据集目录下。
 
 ## 设计原则
 
