@@ -46,13 +46,41 @@ def parse_class_names(dataset_root: Path) -> dict[int, str]:
     if not yaml_path.exists():
         yaml_path = dataset_root / "dataset.yaml"
     if not yaml_path.exists():
-        return {}
+        return _parse_classes_file(dataset_root)
 
     text = yaml_path.read_text(encoding="utf-8", errors="replace")
     names = _parse_inline_names(text)
     if names:
         return names
-    return _parse_block_names(text)
+    names = _parse_block_names(text)
+    if names:
+        return names
+    return _parse_classes_file(dataset_root)
+
+
+def _parse_classes_file(dataset_root: Path) -> dict[int, str]:
+    for filename in ("classes.txt", "classes", "obj.names"):
+        path = dataset_root / filename
+        if not path.exists() or not path.is_file():
+            continue
+
+        result: dict[int, str] = {}
+        for index, raw_line in enumerate(_read_text(path).splitlines()):
+            name = raw_line.strip()
+            if name:
+                result[index] = name
+        if result:
+            return result
+    return {}
+
+
+def _read_text(path: Path) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _parse_inline_names(text: str) -> dict[int, str]:
@@ -121,4 +149,3 @@ def _clean_yaml_scalar(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
-

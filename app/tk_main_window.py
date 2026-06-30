@@ -40,6 +40,15 @@ class TkMainWindow:
         self.current_index = 0
         self.current_photo: ImageTk.PhotoImage | None = None
         self.current_display_image: Image.Image | None = None
+        self.current_image_item: int | None = None
+        self.cached_item_index: int | None = None
+        self.cached_source_image: Image.Image | None = None
+        self.cached_annotated_image: Image.Image | None = None
+        self.label_font = self._load_label_font(14)
+        self.zoom_factor = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._drag_start: tuple[int, int, float, float] | None = None
 
         self.status_var = tk.StringVar(value="未打开数据集")
         self.group_var = tk.StringVar(value="当前分组：-")
@@ -66,6 +75,13 @@ class TkMainWindow:
         self.canvas = tk.Canvas(center, bg="#202124", highlightthickness=0)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda _event: self._show_current())
+        self.canvas.bind("<MouseWheel>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-4>", self._on_mouse_wheel)
+        self.canvas.bind("<Button-5>", self._on_mouse_wheel)
+        self.canvas.bind("<ButtonPress-1>", self._on_drag_start)
+        self.canvas.bind("<B1-Motion>", self._on_drag_move)
+        self.canvas.bind("<ButtonRelease-1>", self._on_drag_end)
+        self.canvas.bind("<Double-Button-1>", self._reset_view)
 
         side = ttk.Frame(root_frame, width=190)
         side.pack(side=tk.RIGHT, fill=tk.Y)
@@ -145,6 +161,7 @@ class TkMainWindow:
         self.relabel_indices, self.delete_indices, saved_index = load_selection_state(self._state_path(), self.items)
         self.current_index = min(max(saved_index, 0), len(self.items) - 1)
 
+        self._reset_view()
         self._rebuild_list()
         self._select_current_list_row()
         self._show_current()
@@ -155,6 +172,7 @@ class TkMainWindow:
         if not self.items:
             return
         self.current_index = max(0, self.current_index - 1)
+        self._reset_view()
         self._select_current_list_row()
         self._show_current()
         self._save_state()
@@ -163,6 +181,7 @@ class TkMainWindow:
         if not self.items:
             return
         self.current_index = min(len(self.items) - 1, self.current_index + 1)
+        self._reset_view()
         self._select_current_list_row()
         self._show_current()
         self._save_state()
@@ -207,6 +226,7 @@ class TkMainWindow:
                 delete_indices=self.delete_indices,
                 output_root=Path(directory),
                 clear_relabel_labels=self.clear_labels_var.get(),
+                source_dataset_root=self.dataset_root,
             )
         except OSError as exc:
             messagebox.showerror("导出失败", f"无法导出数据集：\n{exc}")
@@ -227,6 +247,7 @@ class TkMainWindow:
         index = int(selection[0])
         if 0 <= index < len(self.items) and index != self.current_index:
             self.current_index = index
+            self._reset_view()
             self._show_current()
             self._save_state()
 
@@ -268,9 +289,8 @@ class TkMainWindow:
             )
             return
 
-        item = self.items[self.current_index]
         try:
-            image = Image.open(item.image_path).convert("RGB")
+            image = self._current_annotated_image()
         except OSError:
             self.canvas.create_text(
                 self.canvas.winfo_width() / 2,
@@ -281,37 +301,64 @@ class TkMainWindow:
             )
             return
 
-        display_image = self._draw_display_image(image, item.boxes)
+        scale = self._display_scale(image)
+        display_image = self._resize_display_image(image, scale)
         self.current_display_image = display_image
         self.current_photo = ImageTk.PhotoImage(display_image)
-        self.canvas.create_image(
-            self.canvas.winfo_width() / 2,
-            self.canvas.winfo_height() / 2,
+        self.current_image_item = self.canvas.create_image(
+            self.canvas.winfo_width() / 2 + self.pan_x,
+            self.canvas.winfo_height() / 2 + self.pan_y,
             image=self.current_photo,
             anchor=tk.CENTER,
         )
-        self._update_info(item)
+        self._update_info(self.items[self.current_index])
 
-    def _draw_display_image(self, image: Image.Image, boxes: tuple[YoloBox, ...]) -> Image.Image:
+    def _current_annotated_image(self) -> Image.Image:
+        if self.cached_item_index == self.current_index and self.cached_annotated_image is not None:
+            return self.cached_annotated_image
+
+        item = self.items[self.current_index]
+        source_image = Image.open(item.image_path).convert("RGB")
+        self.cached_item_index = self.current_index
+        self.cached_source_image = source_image
+        self.cached_annotated_image = self._draw_annotated_image(source_image, item.boxes)
+        return self.cached_annotated_image
+
+    def _clear_image_cache(self) -> None:
+        self.current_photo = None
+        self.current_display_image = None
+        self.current_image_item = None
+        self.cached_item_index = None
+        self.cached_source_image = None
+        self.cached_annotated_image = None
+
+    def _display_scale(self, image: Image.Image) -> float:
         canvas_width = max(1, self.canvas.winfo_width() - 24)
         canvas_height = max(1, self.canvas.winfo_height() - 24)
         image_width, image_height = image.size
-        scale = min(canvas_width / image_width, canvas_height / image_height)
-        display_size = (max(1, int(image_width * scale)), max(1, int(image_height * scale)))
-        display_image = image.resize(display_size, Image.Resampling.LANCZOS)
+        fit_scale = min(canvas_width / image_width, canvas_height / image_height)
+        return max(0.01, fit_scale * self.zoom_factor)
 
-        draw = ImageDraw.Draw(display_image)
-        font = ImageFont.load_default()
-        scale_x = display_size[0] / image_width
-        scale_y = display_size[1] / image_height
+    def _resize_display_image(self, image: Image.Image, scale: float) -> Image.Image:
+        image_width, image_height = image.size
+        display_size = (max(1, int(image_width * scale)), max(1, int(image_height * scale)))
+        resampling = Image.Resampling.BILINEAR if self.zoom_factor != 1.0 else Image.Resampling.LANCZOS
+        return image.resize(display_size, resampling)
+
+    def _draw_annotated_image(self, image: Image.Image, boxes: tuple[YoloBox, ...]) -> Image.Image:
+        annotated = image.copy()
+        draw = ImageDraw.Draw(annotated)
+        font = self.label_font
+        image_width, image_height = image.size
 
         for box in boxes:
             color = BOX_COLORS[box.class_id % len(BOX_COLORS)]
-            x1 = (box.x_center - box.width / 2) * image_width * scale_x
-            y1 = (box.y_center - box.height / 2) * image_height * scale_y
-            x2 = (box.x_center + box.width / 2) * image_width * scale_x
-            y2 = (box.y_center + box.height / 2) * image_height * scale_y
-            draw.rectangle((x1, y1, x2, y2), outline=color, width=2)
+            x1 = (box.x_center - box.width / 2) * image_width
+            y1 = (box.y_center - box.height / 2) * image_height
+            x2 = (box.x_center + box.width / 2) * image_width
+            y2 = (box.y_center + box.height / 2) * image_height
+            line_width = max(2, round(min(image_width, image_height) / 500))
+            draw.rectangle((x1, y1, x2, y2), outline=color, width=line_width)
 
             label = self.class_names.get(box.class_id, f"class {box.class_id}")
             bbox = draw.textbbox((0, 0), label, font=font)
@@ -321,7 +368,73 @@ class TkMainWindow:
             draw.rectangle((x1, label_y, x1 + label_width, label_y + label_height), fill=color)
             draw.text((x1 + 4, label_y + 3), label, fill="#111111", font=font)
 
-        return display_image
+        return annotated
+
+    def _on_mouse_wheel(self, event) -> str:
+        if not self.items:
+            return "break"
+
+        old_zoom = self.zoom_factor
+        if getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0:
+            self.zoom_factor = min(12.0, self.zoom_factor * 1.15)
+        else:
+            self.zoom_factor = max(0.2, self.zoom_factor / 1.15)
+
+        ratio = self.zoom_factor / old_zoom
+        center_x = self.canvas.winfo_width() / 2
+        center_y = self.canvas.winfo_height() / 2
+        self.pan_x = event.x - center_x - (event.x - center_x - self.pan_x) * ratio
+        self.pan_y = event.y - center_y - (event.y - center_y - self.pan_y) * ratio
+        self._show_current()
+        return "break"
+
+    def _on_drag_start(self, event) -> str:
+        self._drag_start = (event.x, event.y, self.pan_x, self.pan_y)
+        self.canvas.configure(cursor="fleur")
+        self.canvas.focus_set()
+        return "break"
+
+    def _on_drag_move(self, event) -> str:
+        if self._drag_start is None:
+            return "break"
+        start_x, start_y, start_pan_x, start_pan_y = self._drag_start
+        self.pan_x = start_pan_x + event.x - start_x
+        self.pan_y = start_pan_y + event.y - start_y
+        if self.current_image_item is not None:
+            self.canvas.coords(
+                self.current_image_item,
+                self.canvas.winfo_width() / 2 + self.pan_x,
+                self.canvas.winfo_height() / 2 + self.pan_y,
+            )
+        return "break"
+
+    def _on_drag_end(self, _event) -> str:
+        self._drag_start = None
+        self.canvas.configure(cursor="")
+        return "break"
+
+    def _reset_view(self, _event=None) -> str:
+        self.zoom_factor = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._drag_start = None
+        self._clear_image_cache()
+        if _event is not None and self.items:
+            self._show_current()
+        return "break"
+
+    def _load_label_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        for font_path in (
+            Path("C:/Windows/Fonts/msyh.ttc"),
+            Path("C:/Windows/Fonts/simhei.ttf"),
+            Path("C:/Windows/Fonts/arial.ttf"),
+        ):
+            if font_path.exists():
+                try:
+                    return ImageFont.truetype(str(font_path), size)
+                except OSError:
+                    continue
+        return ImageFont.load_default()
 
     def _update_info(self, item: DatasetItem) -> None:
         selected_flag = self._current_status_text()

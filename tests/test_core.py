@@ -56,6 +56,13 @@ class CoreTests(unittest.TestCase):
 
             self.assertEqual(parse_class_names(root), {0: "person", 1: "car"})
 
+    def test_parse_classes_txt_class_names(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "classes.txt").write_text("fallen_tree\n倒伏树木\n", encoding="utf-8")
+
+            self.assertEqual(parse_class_names(root), {0: "fallen_tree", 1: "倒伏树木"})
+
     def test_scan_jpegimages_and_yolo_labels_dataset(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp) / "dataset"
@@ -87,6 +94,7 @@ class CoreTests(unittest.TestCase):
             label_dir = root / "labels" / "train"
             image_dir.mkdir(parents=True)
             label_dir.mkdir(parents=True)
+            (root / "classes.txt").write_text("fallen_tree\n", encoding="utf-8")
 
             for name, label in [
                 ("a.jpg", "0 0.5 0.5 0.2 0.2\n"),
@@ -104,12 +112,16 @@ class CoreTests(unittest.TestCase):
                 delete_indices={1},
                 output_root=output,
                 clear_relabel_labels=True,
+                source_dataset_root=root,
             )
 
             self.assertEqual(counts, {"relabel": 1, "delete": 1, "qualified": 1})
             self.assertTrue((output / "relabel" / "images" / "train" / "a.jpg").exists())
             self.assertTrue((output / "delete" / "labels" / "train" / "b.txt").exists())
             self.assertTrue((output / "qualified" / "images" / "train" / "c.jpg").exists())
+            self.assertEqual((output / "relabel" / "classes.txt").read_text(encoding="utf-8"), "fallen_tree\n")
+            self.assertEqual((output / "delete" / "classes.txt").read_text(encoding="utf-8"), "fallen_tree\n")
+            self.assertEqual((output / "qualified" / "classes.txt").read_text(encoding="utf-8"), "fallen_tree\n")
             self.assertEqual((output / "relabel" / "labels" / "train" / "a.txt").read_text(encoding="utf-8"), "")
 
     def test_state_restores_by_relative_path(self):

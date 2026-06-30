@@ -9,16 +9,21 @@ from typing import Iterable
 from .models import DatasetItem
 
 
+CLASS_NAME_FILENAMES = ("classes.txt", "classes", "obj.names")
+
+
 def export_relabel_dataset(
     items: Iterable[DatasetItem],
     selected_indices: Iterable[int],
     output_root: Path,
     *,
     clear_labels: bool,
+    source_dataset_root: Path | None = None,
 ) -> int:
     item_list = list(items)
     selected = _valid_indices(selected_indices, len(item_list))
     records = _copy_group(item_list, selected, output_root, clear_labels=clear_labels)
+    _copy_class_name_files(source_dataset_root, output_root)
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "clear_labels": clear_labels,
@@ -41,6 +46,7 @@ def export_split_dataset(
     output_root: Path,
     clear_relabel_labels: bool,
     include_qualified: bool = True,
+    source_dataset_root: Path | None = None,
 ) -> dict[str, int]:
     output_root = output_root.expanduser().resolve()
     item_list = list(items)
@@ -53,6 +59,10 @@ def export_split_dataset(
         "delete": _copy_group(item_list, delete, output_root / "delete", clear_labels=False),
         "qualified": _copy_group(item_list, qualified, output_root / "qualified", clear_labels=False),
     }
+    _copy_class_name_files(source_dataset_root, output_root / "relabel")
+    _copy_class_name_files(source_dataset_root, output_root / "delete")
+    if include_qualified:
+        _copy_class_name_files(source_dataset_root, output_root / "qualified")
     counts = {name: len(group_records) for name, group_records in records.items()}
 
     manifest = {
@@ -112,6 +122,23 @@ def _copy_group(
             }
         )
     return records
+
+
+def _copy_class_name_files(source_dataset_root: Path | None, output_root: Path) -> list[Path]:
+    if source_dataset_root is None:
+        return []
+
+    source_dataset_root = source_dataset_root.expanduser().resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    copied: list[Path] = []
+    for filename in CLASS_NAME_FILENAMES:
+        source_path = source_dataset_root / filename
+        if not source_path.exists() or not source_path.is_file():
+            continue
+        target_path = output_root / filename
+        shutil.copy2(source_path, target_path)
+        copied.append(target_path)
+    return copied
 
 
 def save_selection_state(
