@@ -44,6 +44,8 @@ class TkMainWindow:
         self.cached_item_index: int | None = None
         self.cached_source_image: Image.Image | None = None
         self.cached_annotated_image: Image.Image | None = None
+        self.cached_boxes_only_image: Image.Image | None = None
+        self.cached_annotation_alpha: int | None = None
         self.label_font = self._load_label_font(14)
         self.zoom_factor = 1.0
         self.pan_x = 0.0
@@ -56,6 +58,9 @@ class TkMainWindow:
         self.detail_var = tk.StringVar(value="-")
         self.selected_var = tk.StringVar(value="待重标：0 | 删除：0 | 合格：0")
         self.clear_labels_var = tk.BooleanVar(value=False)
+        self.hide_boxes_var = tk.BooleanVar(value=False)
+        self.hide_labels_var = tk.BooleanVar(value=False)
+        self.annotation_opacity_var = tk.IntVar(value=100)
 
         self._build_layout()
         self._bind_shortcuts()
@@ -109,10 +114,38 @@ class TkMainWindow:
         self.export_button = ttk.Button(side, text="导出 (Ctrl+E)", command=self.export_split, takefocus=False)
         self.previous_button = ttk.Button(side, text="上一张 (A/←)", command=self.previous_item, takefocus=False)
         self.next_button = ttk.Button(side, text="下一张 (D/→)", command=self.next_item, takefocus=False)
+        self.hide_boxes_checkbutton = ttk.Checkbutton(
+            side,
+            text="隐藏框和类别名 (S)",
+            variable=self.hide_boxes_var,
+            command=self._refresh_annotation_view,
+            takefocus=False,
+        )
+        self.hide_labels_checkbutton = ttk.Checkbutton(
+            side,
+            text="只隐藏类别名 (Q)",
+            variable=self.hide_labels_var,
+            command=self._refresh_annotation_view,
+            takefocus=False,
+        )
+        self.opacity_label = ttk.Label(side, text="标注透明度：100%")
+        self.opacity_scale = ttk.Scale(
+            side,
+            from_=20,
+            to=100,
+            orient=tk.HORIZONTAL,
+            command=self._on_opacity_change,
+            takefocus=False,
+        )
+        self.opacity_scale.set(100)
 
         self.open_button.pack(fill=tk.X, pady=3)
         self.toggle_button.pack(fill=tk.X, pady=3)
         self.delete_button.pack(fill=tk.X, pady=3)
+        self.hide_boxes_checkbutton.pack(anchor=tk.W, pady=(8, 2))
+        self.hide_labels_checkbutton.pack(anchor=tk.W, pady=2)
+        self.opacity_label.pack(anchor=tk.W, pady=(8, 1))
+        self.opacity_scale.pack(fill=tk.X, pady=(0, 6))
         ttk.Checkbutton(side, text="导出时清空标签", variable=self.clear_labels_var).pack(anchor=tk.W, pady=6)
         self.export_button.pack(fill=tk.X, pady=3)
 
@@ -133,6 +166,10 @@ class TkMainWindow:
         self.root.bind_all("<Delete>", lambda _event: self._run_shortcut(self.toggle_delete))
         self.root.bind_all("w", lambda _event: self._run_shortcut(self.toggle_delete))
         self.root.bind_all("W", lambda _event: self._run_shortcut(self.toggle_delete))
+        self.root.bind_all("s", lambda _event: self._run_shortcut(self.toggle_hide_boxes))
+        self.root.bind_all("S", lambda _event: self._run_shortcut(self.toggle_hide_boxes))
+        self.root.bind_all("q", lambda _event: self._run_shortcut(self.toggle_hide_labels))
+        self.root.bind_all("Q", lambda _event: self._run_shortcut(self.toggle_hide_labels))
 
     def _run_shortcut(self, action) -> str:
         action()
@@ -209,6 +246,19 @@ class TkMainWindow:
         self._refresh_list_item(self.current_index)
         self._show_current()
         self._save_state()
+
+    def toggle_hide_boxes(self) -> None:
+        self.hide_boxes_var.set(not self.hide_boxes_var.get())
+        self._refresh_annotation_view()
+
+    def toggle_hide_labels(self) -> None:
+        self.hide_labels_var.set(not self.hide_labels_var.get())
+        self._refresh_annotation_view()
+
+    def _refresh_annotation_view(self) -> None:
+        if self.items:
+            self._show_current()
+        self.canvas.focus_set()
 
     def export_split(self) -> None:
         if not self.items:
@@ -290,7 +340,7 @@ class TkMainWindow:
             return
 
         try:
-            image = self._current_annotated_image()
+            image = self._current_view_image()
         except OSError:
             self.canvas.create_text(
                 self.canvas.winfo_width() / 2,
@@ -302,26 +352,47 @@ class TkMainWindow:
             return
 
         scale = self._display_scale(image)
-        display_image = self._resize_display_image(image, scale)
+        display_image = self._render_viewport_image(image, scale)
         self.current_display_image = display_image
         self.current_photo = ImageTk.PhotoImage(display_image)
         self.current_image_item = self.canvas.create_image(
-            self.canvas.winfo_width() / 2 + self.pan_x,
-            self.canvas.winfo_height() / 2 + self.pan_y,
+            0,
+            0,
             image=self.current_photo,
-            anchor=tk.CENTER,
+            anchor=tk.NW,
         )
         self._update_info(self.items[self.current_index])
 
-    def _current_annotated_image(self) -> Image.Image:
-        if self.cached_item_index == self.current_index and self.cached_annotated_image is not None:
-            return self.cached_annotated_image
-
+    def _current_view_image(self) -> Image.Image:
         item = self.items[self.current_index]
-        source_image = Image.open(item.image_path).convert("RGB")
-        self.cached_item_index = self.current_index
-        self.cached_source_image = source_image
-        self.cached_annotated_image = self._draw_annotated_image(source_image, item.boxes)
+        if self.cached_item_index != self.current_index or self.cached_source_image is None:
+            self.cached_item_index = self.current_index
+            self.cached_source_image = Image.open(item.image_path).convert("RGB")
+            self.cached_annotated_image = None
+            self.cached_boxes_only_image = None
+
+        if self.hide_boxes_var.get():
+            return self.cached_source_image
+
+        if self.hide_labels_var.get():
+            alpha = self._annotation_alpha()
+            if self.cached_boxes_only_image is None:
+                self.cached_boxes_only_image = self._draw_annotated_image(
+                    self.cached_source_image,
+                    item.boxes,
+                    show_labels=False,
+                    alpha=alpha,
+                )
+            return self.cached_boxes_only_image
+
+        alpha = self._annotation_alpha()
+        if self.cached_annotated_image is None:
+            self.cached_annotated_image = self._draw_annotated_image(
+                self.cached_source_image,
+                item.boxes,
+                show_labels=True,
+                alpha=alpha,
+            )
         return self.cached_annotated_image
 
     def _clear_image_cache(self) -> None:
@@ -331,6 +402,8 @@ class TkMainWindow:
         self.cached_item_index = None
         self.cached_source_image = None
         self.cached_annotated_image = None
+        self.cached_boxes_only_image = None
+        self.cached_annotation_alpha = None
 
     def _display_scale(self, image: Image.Image) -> float:
         canvas_width = max(1, self.canvas.winfo_width() - 24)
@@ -345,14 +418,57 @@ class TkMainWindow:
         resampling = Image.Resampling.BILINEAR if self.zoom_factor != 1.0 else Image.Resampling.LANCZOS
         return image.resize(display_size, resampling)
 
-    def _draw_annotated_image(self, image: Image.Image, boxes: tuple[YoloBox, ...]) -> Image.Image:
-        annotated = image.copy()
-        draw = ImageDraw.Draw(annotated)
+    def _render_viewport_image(self, image: Image.Image, scale: float) -> Image.Image:
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        viewport = Image.new("RGB", (canvas_width, canvas_height), (32, 33, 36))
+
+        image_width, image_height = image.size
+        display_width = image_width * scale
+        display_height = image_height * scale
+        image_left = canvas_width / 2 + self.pan_x - display_width / 2
+        image_top = canvas_height / 2 + self.pan_y - display_height / 2
+        image_right = image_left + display_width
+        image_bottom = image_top + display_height
+
+        visible_left = max(0.0, image_left)
+        visible_top = max(0.0, image_top)
+        visible_right = min(float(canvas_width), image_right)
+        visible_bottom = min(float(canvas_height), image_bottom)
+        if visible_right <= visible_left or visible_bottom <= visible_top:
+            return viewport
+
+        src_left = max(0.0, (visible_left - image_left) / scale)
+        src_top = max(0.0, (visible_top - image_top) / scale)
+        src_right = min(float(image_width), (visible_right - image_left) / scale)
+        src_bottom = min(float(image_height), (visible_bottom - image_top) / scale)
+
+        crop_box = (
+            max(0, int(src_left)),
+            max(0, int(src_top)),
+            min(image_width, max(int(src_right + 0.999), int(src_left) + 1)),
+            min(image_height, max(int(src_bottom + 0.999), int(src_top) + 1)),
+        )
+        target_left = int(round(visible_left))
+        target_top = int(round(visible_top))
+        target_width = max(1, int(round(visible_right - visible_left)))
+        target_height = max(1, int(round(visible_bottom - visible_top)))
+
+        resampling = Image.Resampling.BILINEAR if self.zoom_factor != 1.0 else Image.Resampling.LANCZOS
+        visible_crop = image.crop(crop_box).resize((target_width, target_height), resampling)
+        viewport.paste(visible_crop, (target_left, target_top))
+        return viewport
+
+    def _draw_annotated_image(self, image: Image.Image, boxes: tuple[YoloBox, ...], *, show_labels: bool, alpha: int) -> Image.Image:
+        annotated = image.convert("RGBA")
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
         font = self.label_font
         image_width, image_height = image.size
+        labels: list[tuple[float, float, str]] = []
 
         for box in boxes:
-            color = BOX_COLORS[box.class_id % len(BOX_COLORS)]
+            color = self._hex_to_rgba(BOX_COLORS[box.class_id % len(BOX_COLORS)], alpha)
             x1 = (box.x_center - box.width / 2) * image_width
             y1 = (box.y_center - box.height / 2) * image_height
             x2 = (box.x_center + box.width / 2) * image_width
@@ -360,15 +476,42 @@ class TkMainWindow:
             line_width = max(2, round(min(image_width, image_height) / 500))
             draw.rectangle((x1, y1, x2, y2), outline=color, width=line_width)
 
+            if not show_labels:
+                continue
+
             label = self.class_names.get(box.class_id, f"class {box.class_id}")
             bbox = draw.textbbox((0, 0), label, font=font)
             label_width = bbox[2] - bbox[0] + 8
             label_height = bbox[3] - bbox[1] + 6
             label_y = max(0, y1 - label_height)
             draw.rectangle((x1, label_y, x1 + label_width, label_y + label_height), fill=color)
-            draw.text((x1 + 4, label_y + 3), label, fill="#111111", font=font)
+            labels.append((x1 + 4, label_y + 3, label))
 
-        return annotated
+        result = Image.alpha_composite(annotated, overlay).convert("RGB")
+        text_draw = ImageDraw.Draw(result)
+        for x, y, label in labels:
+            text_draw.text((x, y), label, fill="#111111", font=font)
+        return result
+
+    def _annotation_alpha(self) -> int:
+        value = max(20, min(100, int(self.annotation_opacity_var.get())))
+        alpha = round(255 * value / 100)
+        if self.cached_annotation_alpha != alpha:
+            self.cached_annotation_alpha = alpha
+            self.cached_annotated_image = None
+            self.cached_boxes_only_image = None
+        return alpha
+
+    def _hex_to_rgba(self, color: str, alpha: int) -> tuple[int, int, int, int]:
+        color = color.lstrip("#")
+        return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16), alpha
+
+    def _on_opacity_change(self, value: str) -> None:
+        opacity = round(float(value))
+        self.annotation_opacity_var.set(opacity)
+        self.opacity_label.configure(text=f"标注透明度：{opacity}%")
+        if self.items and not self.hide_boxes_var.get():
+            self._show_current()
 
     def _on_mouse_wheel(self, event) -> str:
         if not self.items:
@@ -400,12 +543,7 @@ class TkMainWindow:
         start_x, start_y, start_pan_x, start_pan_y = self._drag_start
         self.pan_x = start_pan_x + event.x - start_x
         self.pan_y = start_pan_y + event.y - start_y
-        if self.current_image_item is not None:
-            self.canvas.coords(
-                self.current_image_item,
-                self.canvas.winfo_width() / 2 + self.pan_x,
-                self.canvas.winfo_height() / 2 + self.pan_y,
-            )
+        self._show_current()
         return "break"
 
     def _on_drag_end(self, _event) -> str:
@@ -506,6 +644,9 @@ class TkMainWindow:
         self.toggle_button.configure(state=state)
         self.delete_button.configure(state=state)
         self.export_button.configure(state=state)
+        self.hide_boxes_checkbutton.configure(state=state)
+        self.hide_labels_checkbutton.configure(state=state)
+        self.opacity_scale.configure(state=state)
 
 
 def main() -> None:
